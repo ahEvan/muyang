@@ -22,6 +22,15 @@ body{
   transition:background-color 1.5s ease,color 1.5s ease;overflow-x:hidden;
 }
 body.nav-open{overflow:hidden;}
+
+/* “跟随时间”到点切换：瞬时完成，屏蔽全站过渡，避免出现渐变过程 */
+html.mood-instant *,
+html.mood-instant *::before,
+html.mood-instant *::after{
+  transition-duration:0s !important;
+  transition-delay:0s !important;
+}
+
 h1,h2,h3,h4,p,ul,ol,figure{margin:0;}
 ul,ol{padding:0;list-style:none;}
 img,svg{max-width:100%;}
@@ -1111,19 +1120,20 @@ html[data-mood="night"] [data-reveal="scale"].in{transform:scale(1);}
     root.setAttribute('data-mood', k >= 0.5 ? 'day' : 'night');
   }
 
-  // 日间锚点 12:00（k=1），夜间锚点 24:00（k=0）
-  // 07:00–18:00 完全日间；18:00–20:00 日→夜；20:00–05:00 完全夜间；05:00–07:00 夜→日
+  /* ===== 跟随时间：只在 05:30 / 17:30 两个时刻硬切换，不再做插值 ===== */
+  var DAY_START_MIN   = 5 * 60 + 30;    // 05:30 起进入日间
+  var NIGHT_START_MIN = 17 * 60 + 30;   // 17:30 起进入夜间
+
+  // 自动模式下只返回 0（夜间）或 1（日间）
   function computeK(date) {
-    var h = date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600;
-    if (h >= 7 && h < 18) return 1;
-    if (h >= 18 && h < 20) return 1 - (h - 18) / 2;
-    if (h >= 20 || h < 5) return 0;
-    return (h - 5) / 2;
+    var minutes = date.getHours() * 60 + date.getMinutes();
+    return (minutes >= DAY_START_MIN && minutes < NIGHT_START_MIN) ? 1 : 0;
   }
 
   var MANUAL_LOCK_MS = 30 * 60 * 1000;
   var moodMode = 'auto';
   var manualUntil = 0;
+  var lastAppliedK = null;
   var moodButtons = Array.prototype.slice.call(document.querySelectorAll('[data-mood-btn]'));
 
   function syncMoodButtons() {
@@ -1144,7 +1154,24 @@ html[data-mood="night"] [data-reveal="scale"].in{transform:scale(1);}
     return computeK(new Date());
   }
 
-  function tick() { applyTheme(currentK()); }
+  /* 瞬间应用主题：临时屏蔽全站 CSS 过渡，让切换一步到位 */
+  function applyThemeInstant(k) {
+    root.classList.add('mood-instant');
+    applyTheme(k);
+    void root.offsetWidth;          // 强制同步重算，确保“无过渡”的切换真正落地
+    root.classList.remove('mood-instant');
+  }
+
+  /* smooth=true 仅用于手动点击“日间/夜间”，保留原有渐变；
+     “跟随时间”一律瞬间切换 */
+  function tick(options) {
+    options = options || {};
+    var k = currentK();
+    if (k === lastAppliedK && !options.force) return;
+    if (options.smooth) applyTheme(k);
+    else applyThemeInstant(k);
+    lastAppliedK = k;
+  }
 
   moodButtons.forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -1152,12 +1179,33 @@ html[data-mood="night"] [data-reveal="scale"].in{transform:scale(1);}
       moodMode = mode;
       manualUntil = (mode === 'auto') ? 0 : Date.now() + MANUAL_LOCK_MS;
       syncMoodButtons();
-      tick();
+      tick({ smooth: mode !== 'auto', force: true });
     });
   });
 
-  tick();
-  setInterval(tick, 60000);
+  /* 精确对齐到下一个 05:30 / 17:30 再执行切换，避免轮询延迟 */
+  function msUntilNextSwitch(date) {
+    var midnight = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    var dayStart = midnight + DAY_START_MIN * 60000;
+    var nightStart = midnight + NIGHT_START_MIN * 60000;
+    var now = date.getTime();
+    if (now < dayStart)   return dayStart - now;
+    if (now < nightStart) return nightStart - now;
+    return dayStart + 86400000 - now;
+  }
+
+  var switchTimer = null;
+  function scheduleSwitch() {
+    clearTimeout(switchTimer);
+    switchTimer = setTimeout(function () {
+      tick();
+      scheduleSwitch();
+    }, Math.max(500, msUntilNextSwitch(new Date()) + 800));
+  }
+
+  tick({ force: true });
+  scheduleSwitch();
+  setInterval(tick, 60000);        // 兜底：处理手动模式 30 分钟锁定到期、休眠唤醒等情况
   document.addEventListener('visibilitychange', function () {
     if (!document.hidden) tick();
   });
